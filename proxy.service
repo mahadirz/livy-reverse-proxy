@@ -1,0 +1,15 @@
+[Unit]
+Description=Proxy Service for Livy
+After=network.target
+
+[Service]
+WorkingDirectory=/home/hadoop
+User=hadoop
+Group=hadoop
+Type=simple
+ExecStart=/usr/bin/python3 /home/hadoop/livy-reverse-proxy/proxy.py
+Restart=on-failure
+RestartSec=10s
+
+[Install]
+WantedBy=multi-user.target
