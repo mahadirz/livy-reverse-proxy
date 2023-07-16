@@ -36,7 +36,7 @@ Running the Server
 You can run the server with the following command:
 
 ```bash
-python proxy_server.py
+python proxy.py
 ```
 The server will listen on 0.0.0.0:8998 and forward to 127.0.0.1:8999 by default.
 
@@ -51,7 +51,7 @@ You can customize the server's configuration through command-line arguments:
 For example, to run the server on 192.168.1.2:8000 and forward to 192.168.1.3:9000, you would use the following command:
 
 ```bash
-python proxy_server.py --server_address 192.168.1.2 8000 --forward_to 192.168.1.3 9000
+python proxy.py --server_address 192.168.1.2 8000 --forward_to 192.168.1.3 9000
 ```
 
 To automatically 
