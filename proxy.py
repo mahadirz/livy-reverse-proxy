@@ -5,6 +5,7 @@ import gzip
 import hashlib
 import json
 import logging
+import pdb
 import re
 import select
 import socket
@@ -47,10 +48,13 @@ class Shiro:
         :param password:
         :return:
         """
+        logging.debug("authenticate")
         if user not in self.users:
             return False
 
         hashed = self.users[user]
+        logging.debug("hashed")
+        logging.debug(hashed)
 
         m = hashlib.sha256()
         m.update(base64.b64decode(hashed['salt']))
@@ -60,6 +64,8 @@ class Shiro:
         for _ in range(hashed['iteration'] - 1):
             digest = hashlib.sha256(digest).digest()
 
+        logging.debug("base64.b64encode(digest).decode()")
+        logging.debug(base64.b64encode(digest).decode())
         return base64.b64encode(digest).decode() == hashed['hashed']
 
 
@@ -70,6 +76,7 @@ class ProxyServer:
         self.input_list = []
         self.channel = {}
         self.server = self._init_server(*config.server_address)
+        self.s = None
 
     def _init_server(self, host, port):
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -102,7 +109,13 @@ class ProxyServer:
             logging.info(f'{clientaddr[0]}:{clientaddr[1]} has connected')
             self.input_list.append(clientsock)
             self.input_list.append(forward)
-            self.channel[clientsock] = {"socket": forward, "type": "client"}
+            self.channel[clientsock] = {
+                "socket": forward,
+                "type": "client",
+                "content_length": 0,
+                "content_recv": 0,
+                "content_encoding": None
+            }
             self.channel[forward] = {"socket": clientsock, "type": "forward"}
         else:
             logging.warning(
@@ -113,7 +126,7 @@ class ProxyServer:
     def _init_forward(host, port):
         try:
             forward = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            forward.connect((host, port))
+            forward.connect((host, int(port)))
             return forward
         except Exception:
             logging.error(traceback.format_exc())
@@ -131,44 +144,88 @@ class ProxyServer:
 
     def on_recv(self):
         if self.channel[self.s]['type'] == "client":
+            logging.debug("on_recv from client:")
+            logging.debug(self.s)
             self.process_client_data()
         else:
             self.channel[self.s]["socket"].sendall(self.data)
+            logging.debug("on_recv from server:")
+            logging.debug(self.s)
+            logging.debug(self.data)
 
     def process_client_data(self):
         """
-        
+        Process data from client
+        Since data can be bigger than the buffer size, we need to handle to read the data by chunk
         :return: 
         """
         try:
-            headers, body = self.data.split(b'\r\n\r\n', 1)
-            header_lines = headers.decode().split('\r\n')
-            method, path, _ = header_lines[0].split()
+            logging.debug("DATA:")
+            logging.debug(self.data)
+
+            # default value
+            original_body = self.data
+            method = "GET"
+            path = "/"
+
+            # @todo use the content progress to directly forward the content
+            logging.debug("Check for content receiving in progress")
+            # content length should be equal to content_recv
+            logging.debug(self.channel[self.s]["content_length"])
+            logging.debug(self.channel[self.s]["content_recv"])
+
+            content_encoding = self.channel[self.s]["content_encoding"]
+            logging.debug("content_encoding:")
+            logging.debug(content_encoding)
+
+            if self.data[0:4] == b"POST" or self.data[0:3] == b"GET" or self.data[0:6] == b"DELETE":
+                headers, original_body = self.data.split(b'\r\n\r\n', 1)
+                header_lines = headers.decode().split('\r\n')
+                method, path, _ = header_lines[0].split()
+                logging.debug("header_lines")
+                logging.debug(header_lines)
+                logging.debug("original_body")
+                logging.debug(original_body)
+                headers = self.parse_headers(header_lines)
+                logging.debug(headers)
+
+                content_length = headers.get("Content-Length")
+                self.channel[self.s]["content_length"] = content_length
+                self.channel[self.s]["content_recv"] = 0  # reset
+                self.channel[self.s]["content_encoding"] = headers.get('Content-Encoding')
+
+            self.channel[self.s]["content_recv"] += len(original_body)
+            body = gzip.decompress(original_body) if content_encoding == 'gzip' else original_body
+
             # the following lines can be refactored as plugin based
             if method == 'POST' and path.startswith('/sessions') and not re.match(r"\/sessions\/\d+?\/statements",
                                                                                   path):
-                if not self.authenticate_request(header_lines, body):
+                if not self.authenticate_request(headers, body):
                     return self.send_auth_error()
             self.channel[self.s]["socket"].sendall(self.data)
         except Exception:
             logging.error(traceback.format_exc())
 
-    def authenticate_request(self, header_lines, body):
-        content_encoding, content_type, headers = self.parse_headers(header_lines)
+    def authenticate_request(self, headers, body):
+        content_type = headers.get('Content-Type')
+        logging.debug(f"content_type: {content_type}")
+
         if content_type == 'application/json':
-            body = gzip.decompress(body) if content_encoding == 'gzip' else body
             post_data = json.loads(body)
+            logging.debug("post_data")
+            logging.debug(post_data)
             if 'proxyUser' in post_data and 'proxyPassword' in headers:
                 return self.shiro.authenticate(post_data['proxyUser'], headers['proxyPassword'])
         return False
 
     @staticmethod
     def parse_headers(header_lines):
-        headers = dict(line.split(":", 1) for line in header_lines[1:] if ":" in line)
-        return headers.get('content-encoding'), headers.get('content-type'), headers
+        headers = dict(map(str.strip, line.split(":", 1)) for line in header_lines[1:] if ":" in line)
+        logging.debug("headers")
+        logging.debug(headers)
+        return headers
 
-    @staticmethod
-    def send_auth_error():
+    def send_auth_error(self):
         error_message = 'Authentication Failed: Invalid proxyUser or proxyPassword'
         response = f'HTTP/1.1 401 Unauthorized Request\r\nContent-Type: text/plain\r\nContent-Length: {len(error_message)}\r\n\r\n{error_message}'
         self.s.sendall(response.encode())
@@ -188,7 +245,6 @@ if __name__ == '__main__':
     config = Config(args.server_address, args.forward_to, args.shiro_path, args.log_level)
 
     server = ProxyServer(config)
-
     try:
         logging.info(f"Listening to {config.server_address[0]}:{config.server_address[1]}")
         logging.info(f"Forwarding host {config.forward_to[0]}:{config.forward_to[1]}")
